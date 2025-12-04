@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>QR在庫カウンター（全デバイス共有・完成版）</title>
+  <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+  <style>
+    body { font-family: sans-serif; max-width: 700px; margin: 0 auto; padding: 16px; }
+    #reader { width: 100%; max-width: 400px; margin-bottom: 16px; }
+    .field { margin-bottom: 8px; }
+    label { display: inline-block; width: 100px; }
+    #login, #app { margin-top: 16px; }
+    #error { color: red; }
+    table { border-collapse: collapse; width: 100%; margin-top: 16px; }
+    th, td { border: 1px solid #aaa; padding: 4px 8px; text-align: center; }
+    thead { background-color: #eee; }
+    #status { color: green; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>🔄 QR在庫カウンター（全デバイス共有）</h1>
+  
+  <!-- Google Apps Script URL設定 -->
+  <div style="background:#f0f8ff;padding:12px;border-radius:8px;margin-bottom:20px;">
+    <strong>https://script.google.com/macros/s/AKfycbxyXrPSV8is9KnRnFCVUr1HeiRA39t7WNF6xhCt-1VGKEMbkka4i_i9Q_3mUurGenUeag/exec</strong><br>
+    <input type="text" id="script-url" value="YOUR_WEB_APP_URL" style="width:100%;padding:8px;font-family:monospace;" />
+    <button onclick="testConnection()" style="background:#4CAF50;color:white;border:none;padding:8px 16px;margin-top:8px;cursor:pointer;">接続テスト</button>
+    <div id="connection-status"></div>
+  </div>
+
+  <div id="login">
+    <p>管理パスワードを入力してください（0402）。</p>
+    <div class="field">
+      <label>パスワード:</label>
+      <input type="password" id="password" />
+    </div>
+    <button id="login-btn">ログイン</button>
+    <div id="error"></div>
+  </div>
+
+  <div id="app" style="display:none;">
+    <div id="status">準備中...</div>
+    <div id="reader"></div>
+    
+    <div id="info" style="display:none;">
+      <div class="field">
+        <label>QR ID:</label> <span id="qr-id"></span>
+      </div>
+      <div class="field">
+        <label>現在の数:</label> <span id="current-value">0</span>
+      </div>
+      <div class="field">
+        <label>増減量:</label>
+        <input type="number" id="delta" value="1" min="1" />
+      </div>
+      <div class="field">
+        <label>モード:</label>
+        <select id="mode">
+          <option value="+">+</option>
+          <option value="-">-</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>作業パス:</label>
+        <input type="password" id="worker-pass" placeholder="1742など" />
+      </div>
+      <button id="apply">✅ 決定（全デバイス更新）</button>
+    </div>
+
+    <h2>📋 全デバイス共有履歴</h2>
+    <table id="history-table">
+      <thead>
+        <tr><th>日時</th><th>QR ID</th><th>モード</th><th>増減量</th><th>変更前</th><th>変更後</th><th>作業パス</th></tr>
+      </thead>
+      <tbody id="history-body"></tbody>
+    </table>
+  </div>
+
+  <script>
+    const ADMIN_PASSWORD = "0402";
+    const WORKER_PASSWORDS = ["1742","2809","3917","4063","5278","6391","7425","8530","9644","1185"];
+    let SCRIPT_URL = "";
+
+    // 接続テスト
+    async function testConnection() {
+      SCRIPT_URL = document.getElementById("script-url").value.trim();
+      if (!SCRIPT_URL) return alert("URLを入力してください");
+      
+      try {
+        document.getElementById("connection-status").innerHTML = "接続テスト中...";
+        const res = await fetch(SCRIPT_URL);
+        const data = await res.json();
+        document.getElementById("connection-status").innerHTML = 
+          `<span style="color:green;">✅ 接続成功！全デバイス共有準備完了</span>`;
+      } catch(e) {
+        document.getElementById("connection-status").innerHTML = 
+          `<span style="color:red;">❌ 接続エラー: ${e.message}</span>`;
+      }
+    }
+
+    // 管理ログイン
+    document.getElementById("login-btn").addEventListener("click", async () => {
+      const input = document.getElementById("password").value;
+      const errorEl = document.getElementById("error");
+      
+      if (input !== ADMIN_PASSWORD) {
+        errorEl.textContent = "パスワードは0402です";
+        return;
+      }
+      if (!SCRIPT_URL) {
+        errorEl.textContent = "先に「接続テスト」を実行してください";
+        return;
+      }
+
+      document.getElementById("login").style.display = "none";
+      document.getElementById("app").style.display = "block";
+      document.getElementById("status").textContent = "Googleスプレッドシート接続完了";
+      startQrApp();
+    });
+
+    // Googleスプレッドシート操作
+    async function getCurrentValue(id) {
+      const res = await fetch(`${SCRIPT_URL}?id=${encodeURIComponent(id)}`);
+      const data = await res.json();
+      return data.value || 0;
+    }
+
+    async function updateValue(id, value, mode, delta, before, workerPass) {
+      await fetch(SCRIPT_URL, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({id, value, mode, delta, before, workerPass})
+      });
+    }
+
+    async function loadHistory() {
+      const res = await fetch(SCRIPT_URL);
+      const data = await res.json();
+      return data.history || [];
+    }
+
+    function isValidWorkerPassword(pass) {
+      return WORKER_PASSWORDS.includes(pass);
+    }
+
+    function startQrApp() {
+      let currentId = null;
+
+      async function showInfoForId(id) {
+        currentId = id;
+        document.getElementById("qr-id").textContent = id;
+        const value = await getCurrentValue(id);
+        document.getElementById("current-value").textContent = value;
+        document.getElementById("info").style.display = "block";
+        document.getElementById("status").textContent = `📱 全デバイス同期: ${id} = ${value}`;
+      }
+
+      // 履歴表示
+      async function renderHistory() {
+        const history = await loadHistory();
+        const tbody = document.getElementById("history-body");
+        tbody.innerHTML = "";
+        history.slice(0, 50).forEach(item => { // 最新50件
+          const tr = document.createElement("tr");
+          ["time","id","mode","delta","before","after","workerPass"].forEach(key => {
+            const td = document.createElement("td");
+            td.textContent = item[key] || "";
+            tr.appendChild(td);
+          });
+          tbody.appendChild(tr);
+        });
+      }
+
+      // 決定ボタン
+      document.getElementById("apply").addEventListener("click", async () => {
+        if (!currentId) return alert("QRコードを読み取ってください");
+
+        const mode = document.getElementById("mode").value;
+        const delta = Number(document.getElementById("delta").value);
+        const workerPass = document.getElementById("worker-pass").value;
+
+        if (!isValidWorkerPassword(workerPass)) return alert("作業パスワードを確認してください");
+        if (isNaN(delta) || delta <= 0) return alert("1以上の数字を入力してください");
+
+        const before = await getCurrentValue(currentId);
+        let after = mode === "+" ? before + delta : before - delta;
+        
+        if (after < 0) return alert("在庫は0未満にできません");
+
+        await updateValue(currentId, after, mode, delta, before, workerPass);
+        document.getElementById("current-value").textContent = after;
+        
+        document.getElementById("worker-pass").value = "";
+        document.getElementById("status").textContent = `✅ 全デバイス更新完了: ${currentId} = ${after}`;
+        renderHistory(); // 履歴再読み込み
+        alert("全デバイスで在庫が更新されました！");
+      });
+
+      // 初期履歴表示
+      renderHistory();
+
+      // QRスキャナ（最初の完成版と同じ安定版）
+      function onScanSuccess(decodedText, decodedResult) {
+        showInfoForId(decodedText);
+      }
+      function onScanError() {}
+
+      const html5QrcodeScanner = new Html5QrcodeScanner(
+        "reader",
+        { fps: 10, qrbox: { width: 250, height: 250 } }
+      );
+      html5QrcodeScanner.render(onScanSuccess, onScanError);
+    }
+  </script>
+</body>
+</html>
